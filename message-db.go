@@ -22,12 +22,13 @@ func init() {
 
 func funcs(c *sqlite.Conn) map[string]sqlite.Function {
 	return map[string]sqlite.Function{
-		"create_table": &createTable{c},
-		"id":           &id{},
-		"cardinal_id":  &cardinalID{},
-		"category":     &category{},
-		"is_category":  &isCategory{},
-		"hash_64":      &hash64{},
+		"initialize_message_db": &initialize{c},
+
+		"id":          &id{},
+		"cardinal_id": &cardinalID{},
+		"category":    &category{},
+		"is_category": &isCategory{},
+		"hash_64":     &hash64{},
 	}
 }
 
@@ -40,13 +41,14 @@ func boolToInt(b bool) int {
 	return 0
 }
 
-type createTable struct{ c *sqlite.Conn }
+type initialize struct{ c *sqlite.Conn }
 
-func (c *createTable) Args() int           { return 0 }
-func (c *createTable) Deterministic() bool { return false }
-func (c *createTable) Apply(ctx *sqlite.Context, values ...sqlite.Value) {
-	const ddl = `
-		CREATE TABLE IF NOT EXISTS messages (
+func (c *initialize) Args() int           { return 0 }
+func (c *initialize) Deterministic() bool { return false }
+func (c *initialize) Apply(ctx *sqlite.Context, values ...sqlite.Value) {
+	ddl := []string{
+		`PRAGMA trusted_schema=1`,
+		`CREATE TABLE IF NOT EXISTS messages (
 			global_position INTEGER PRIMARY KEY,
 			position INTEGER NOT NULL,
 			time DATETIME NOT NULL,
@@ -55,11 +57,28 @@ func (c *createTable) Apply(ctx *sqlite.Context, values ...sqlite.Value) {
 			data JSONB,
 			metadata JSONB,
 			id UUID NOT NULL
-		)
-	`
+		)`,
+		`DROP INDEX IF EXISTS messages_category`,
+		`CREATE INDEX messages_category ON messages (
+			category(stream_name),
+			global_position,
+			category(metadata->>'correlationStreamName')
+		)`,
+		`DROP INDEX IF EXISTS messages_id`,
+		`CREATE UNIQUE INDEX messages_id ON messages (
+			id
+		)`,
+		`DROP INDEX IF EXISTS messages_stream`,
+		`CREATE UNIQUE INDEX messages_stream ON messages (
+			stream_name,
+			position
+		)`,
+	}
 
-	if err := c.c.Exec(ddl, nil); err != nil {
-		ctx.ResultError(err)
+	for _, ddl := range ddl {
+		if err := c.c.Exec(ddl, nil); err != nil {
+			ctx.ResultError(err)
+		}
 	}
 }
 

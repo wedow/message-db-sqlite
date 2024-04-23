@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -30,8 +31,8 @@ func funcs(c *sqlite.Conn) map[string]sqlite.Function {
 		"is_category": &isCategory{},
 		"hash_64":     &hash64{},
 
-		"write_message":  &noop{},
-		"stream_version": &noop{},
+		"write_message":  &writeMessage{c},
+		"stream_version": &streamVersion{c},
 
 		"get_category_messages":   &noop{},
 		"get_last_stream_message": &noop{},
@@ -64,7 +65,7 @@ func (c *initialize) Apply(ctx *sqlite.Context, values ...sqlite.Value) {
 		`CREATE TABLE IF NOT EXISTS messages (
 			global_position INTEGER PRIMARY KEY,
 			position INTEGER NOT NULL,
-			time DATETIME NOT NULL,
+			time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			stream_name TEXT NOT NULL,
 			type TEXT NOT NULL,
 			data JSONB,
@@ -164,4 +165,114 @@ func (*hash64) Apply(ctx *sqlite.Context, values ...sqlite.Value) {
 	}
 
 	ctx.ResultInt64(hash)
+}
+
+func streamVersionFn(c *sqlite.Conn, streamName string) (int64, error) {
+	const query = `
+		SELECT
+			max(position) AS position
+		FROM
+			messages
+		WHERE
+			messages.stream_name = $1
+	`
+
+	stmt, _, err := c.Prepare(query)
+	if err != nil {
+		return 0, err
+	}
+
+	defer stmt.Finalize()
+
+	stmt.BindText(1, streamName)
+
+	found, err := stmt.Step()
+	if err != nil {
+		return 0, err
+	} else if !found {
+		return -1, nil
+	}
+
+	val := stmt.GetValue("position")
+	if val.Type() == sqlite.SQLITE_NULL {
+		return -1, nil
+	}
+
+	return val.Int64(), nil
+}
+
+type streamVersion struct{ c *sqlite.Conn }
+
+func (c *streamVersion) Args() int           { return 1 }
+func (c *streamVersion) Deterministic() bool { return false }
+func (c *streamVersion) Apply(ctx *sqlite.Context, values ...sqlite.Value) {
+	v, err := streamVersionFn(c.c, values[0].Text())
+	if err != nil {
+		ctx.ResultError(err)
+		return
+	}
+
+	ctx.ResultInt64(v)
+}
+
+type writeMessage struct{ c *sqlite.Conn }
+
+func (c *writeMessage) Args() int           { return 6 }
+func (c *writeMessage) Deterministic() bool { return false }
+func (c *writeMessage) Apply(ctx *sqlite.Context, values ...sqlite.Value) {
+	var (
+		id              = values[0].Text()
+		streamName      = values[1].Text()
+		messageType     = values[2].Text()
+		data            = values[3].Blob()
+		metadata        = values[4].Blob()
+		expectedVersion = values[5].Int64()
+	)
+
+	version, err := streamVersionFn(c.c, streamName)
+	if err != nil {
+		ctx.ResultError(err)
+		return
+	}
+
+	if version != expectedVersion {
+		ctx.ResultError(fmt.Errorf(
+			"Wrong expected version: %d (Stream: %s, Stream Version: %d)",
+			expectedVersion,
+			streamName,
+			version,
+		))
+		return
+	}
+
+	next := version + 1
+	const query = `
+		INSERT INTO messages
+			(
+				id,
+				stream_name,
+				position,
+				type,
+				data,
+				metadata
+			)
+		VALUES
+			(
+				?,?,?,?,?,?
+			)
+	`
+
+	if err := c.c.Exec(
+		query,
+		nil,
+		id,
+		streamName,
+		next,
+		messageType,
+		data,
+		metadata,
+	); err != nil {
+		ctx.ResultError(err)
+		return
+	}
 }

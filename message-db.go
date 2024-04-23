@@ -29,6 +29,13 @@ func funcs(c *sqlite.Conn) map[string]sqlite.Function {
 		"category":    &category{},
 		"is_category": &isCategory{},
 		"hash_64":     &hash64{},
+
+		"write_message":  &noop{},
+		"stream_version": &noop{},
+
+		"get_category_messages":   &noop{},
+		"get_last_stream_message": &noop{},
+		"get_stream_messages":     &noop{},
 	}
 }
 
@@ -40,6 +47,12 @@ func boolToInt(b bool) int {
 	}
 	return 0
 }
+
+type noop struct{}
+
+func (c *noop) Args() int                                         { return 0 }
+func (c *noop) Deterministic() bool                               { return true }
+func (c *noop) Apply(ctx *sqlite.Context, values ...sqlite.Value) {}
 
 type initialize struct{ c *sqlite.Conn }
 
